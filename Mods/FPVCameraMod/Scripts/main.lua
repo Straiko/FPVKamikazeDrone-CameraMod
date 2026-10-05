@@ -1,224 +1,253 @@
--- FPV Kamikaze Drone - Camera Switcher Mod (Macro <-> Non-Macro)
--- Allows players to switch between the default zoomed "Macro" view
--- and a wide-angle "Non-Macro" FPV camera in flight.
+-- FPV Kamikaze Drone - Flight Mode Switcher (Acro <-> Non-Acro / Stabilized)
+-- Allows players to switch between:
+-- 1. ACRO MODE: Full manual rate mode (default FPV, no self-leveling).
+-- 2. NON-ACRO MODE: Angle / Stabilized mode (automatic horizon self-leveling).
 
 local UEHelpers = require("UEHelpers")
 local Config = require("config")
 
-print("[FPVCameraMod] Initializing FPV Camera Switcher Mod...\n")
+print("[FPVFlightMode] Initializing Acro / Non-Acro Flight Mode Switcher...\n")
 
 local State = {
-    CurrentMode = "MACRO", -- "MACRO" or "NON_MACRO"
-    TargetFOV = Config.MacroFOV,
-    CurrentFOV = Config.MacroFOV,
-    InitialDroneFOV = nil,
-    IsTransitioning = false,
+    CurrentMode = Config.DefaultMode or "ACRO", -- "ACRO" or "NON_ACRO"
     CachedPlayerController = nil,
     CachedPawn = nil,
+    CachedPhysComp = nil,
+    NativeCandidates = {},
+    IsLoopRunning = false,
     LastNotificationTime = 0
 }
 
 local function Log(msg)
-    print(string.format("[FPVCameraMod] %s\n", msg))
+    print(string.format("[FPVFlightMode] %s\n", msg))
 end
 
--- Safely retrieve active PlayerController without spamming FindAllOf
-local function GetActivePlayerController()
-    if State.CachedPlayerController and State.CachedPlayerController:IsValid() then
-        return State.CachedPlayerController
-    end
-    local ok, pc = pcall(function() return UEHelpers.GetPlayerController() end)
-    if ok and pc and pc:IsValid() then
-        State.CachedPlayerController = pc
-        return pc
-    end
-    return nil
-end
+-- Safely find the simulated physics component on the drone
+local function FindDronePhysicsComponent(Pawn)
+    if not Pawn or not Pawn:IsValid() then return nil end
 
--- Safely retrieve active Pawn
-local function GetActivePawn()
-    if State.CachedPawn and State.CachedPawn:IsValid() then
-        return State.CachedPawn
-    end
-    local pc = GetActivePlayerController()
-    if pc and pc:IsValid() then
-        if pc.Pawn and pc.Pawn:IsValid() then
-            State.CachedPawn = pc.Pawn
-            return pc.Pawn
-        elseif pc.AcknowledgedPawn and pc.AcknowledgedPawn:IsValid() then
-            State.CachedPawn = pc.AcknowledgedPawn
-            return pc.AcknowledgedPawn
-        end
-    end
-    return nil
-end
-
--- Cached CameraComponent class reference
-local CameraClassRef = nil
-local function GetCameraClass()
-    if not CameraClassRef or not CameraClassRef:IsValid() then
-        pcall(function()
-            CameraClassRef = StaticFindObject("/Script/Engine.CameraComponent")
-        end)
-    end
-    return CameraClassRef
-end
-
---- Apply FOV to all relevant camera components and managers
-local function ApplyCameraFOV(NewFOV)
-    local PlayerController = GetActivePlayerController()
-    if not PlayerController or not PlayerController:IsValid() then
-        return false
-    end
-
-    local applied = false
-
-    -- 1. Update PlayerCameraManager
+    -- 1. Check RootComponent
     pcall(function()
-        local CameraManager = PlayerController.PlayerCameraManager
-        if CameraManager and CameraManager:IsValid() then
-            CameraManager.DefaultFOV = NewFOV
-            CameraManager.LockedFOV = NewFOV
-            if CameraManager.SetFOV then
-                CameraManager:SetFOV(NewFOV)
+        if Pawn.RootComponent and Pawn.RootComponent:IsValid() then
+            local root = Pawn.RootComponent
+            if root.IsSimulatingPhysics and root:IsSimulatingPhysics() then
+                return root
             end
-            applied = true
         end
     end)
 
-    -- 2. Call PlayerController FOV command if available
+    -- 2. Check Mesh
     pcall(function()
-        if PlayerController.FOV then
-            PlayerController:FOV(NewFOV)
-            applied = true
+        if Pawn.Mesh and Pawn.Mesh:IsValid() then
+            local mesh = Pawn.Mesh
+            if mesh.IsSimulatingPhysics and mesh:IsSimulatingPhysics() then
+                return mesh
+            end
         end
     end)
 
-    -- 3. Update CameraComponents on the drone pawn
-    local TargetActor = GetActivePawn()
-    if TargetActor and TargetActor:IsValid() then
-        -- Direct CameraComponent property
-        pcall(function()
-            if TargetActor.CameraComponent and TargetActor.CameraComponent:IsValid() then
-                if State.InitialDroneFOV == nil and TargetActor.CameraComponent.FieldOfView then
-                    State.InitialDroneFOV = TargetActor.CameraComponent.FieldOfView
+    -- 3. Fallback: check any PrimitiveComponent on Pawn
+    local PrimitiveClass = StaticFindObject("/Script/Engine.PrimitiveComponent")
+    if PrimitiveClass and PrimitiveClass:IsValid() and Pawn.K2_GetComponentsByClass then
+        local comps = Pawn:K2_GetComponentsByClass(PrimitiveClass)
+        if comps and comps:IsValid() and comps.ForEach then
+            local found = nil
+            comps:ForEach(function(index, comp)
+                if not found and comp and comp:IsValid() and comp.IsSimulatingPhysics and comp:IsSimulatingPhysics() then
+                    found = comp
                 end
-                TargetActor.CameraComponent.FieldOfView = NewFOV
-                if TargetActor.CameraComponent.SetFieldOfView then
-                    TargetActor.CameraComponent:SetFieldOfView(NewFOV)
-                end
-                applied = true
-            end
-        end)
+            end)
+            if found then return found end
+        end
+    end
 
-        -- Iterate components via UE4SS TArray :ForEach (never ipairs!)
-        pcall(function()
-            local CamClass = GetCameraClass()
-            if CamClass and CamClass:IsValid() and TargetActor.K2_GetComponentsByClass then
-                local comps = TargetActor:K2_GetComponentsByClass(CamClass)
-                if comps and comps:IsValid() and comps.ForEach then
-                    comps:ForEach(function(index, comp)
-                        if comp and comp:IsValid() then
-                            if State.InitialDroneFOV == nil and comp.FieldOfView then
-                                State.InitialDroneFOV = comp.FieldOfView
-                            end
-                            comp.FieldOfView = NewFOV
-                            if comp.SetFieldOfView then
-                                comp:SetFieldOfView(NewFOV)
-                            end
-                            applied = true
+    return Pawn.RootComponent
+end
+
+-- Scan Pawn and Components for native stabilization / flight mode variables
+local function ScanForNativeFlightMode(Pawn)
+    if not Pawn or not Pawn:IsValid() then return {} end
+
+    local candidates = {}
+
+    -- Scan Pawn properties
+    pcall(function()
+        local class = Pawn:GetClass()
+        while class and class:IsValid() do
+            class:ForEachProperty(function(prop)
+                local name = prop:GetFName():ToString():lower()
+                if name:find("stabiliz") or name:find("acro") or name:find("angle") or name:find("flightmode") then
+                    Log(string.format("Discovered native Pawn property: %s", prop:GetFName():ToString()))
+                    table.insert(candidates, { Object = Pawn, PropertyName = prop:GetFName():ToString() })
+                end
+            end)
+            class = class:GetSuperClass()
+        end
+    end)
+
+    -- Scan components (e.g. BP_IMUComponent)
+    pcall(function()
+        local ActorComponentClass = StaticFindObject("/Script/Engine.ActorComponent")
+        if ActorComponentClass and ActorComponentClass:IsValid() and Pawn.K2_GetComponentsByClass then
+            local comps = Pawn:K2_GetComponentsByClass(ActorComponentClass)
+            if comps and comps:IsValid() and comps.ForEach then
+                comps:ForEach(function(idx, comp)
+                    if comp and comp:IsValid() then
+                        local cClass = comp:GetClass()
+                        local cName = cClass:GetFName():ToString()
+                        while cClass and cClass:IsValid() do
+                            cClass:ForEachProperty(function(prop)
+                                local name = prop:GetFName():ToString():lower()
+                                if name:find("stabiliz") or name:find("acro") or name:find("angle") or name:find("flightmode") then
+                                    Log(string.format("Discovered component property: %s.%s", cName, prop:GetFName():ToString()))
+                                    table.insert(candidates, { Object = comp, ComponentName = cName, PropertyName = prop:GetFName():ToString() })
+                                end
+                            end)
+                            cClass = cClass:GetSuperClass()
                         end
-                    end)
+                    end
+                end)
+            end
+        end
+    end)
+
+    return candidates
+end
+
+-- Apply flight mode to native properties if available
+local function ApplyNativeMode(IsNonAcro)
+    for _, candidate in ipairs(State.NativeCandidates) do
+        pcall(function()
+            if candidate.Object and candidate.Object:IsValid() then
+                local propName = candidate.PropertyName
+                local lowerName = propName:lower()
+                if lowerName:find("acro") then
+                    candidate.Object[propName] = not IsNonAcro
+                else
+                    candidate.Object[propName] = IsNonAcro
                 end
+                Log(string.format("Applied native property %s = %s", propName, tostring(candidate.Object[propName])))
             end
         end)
     end
-
-    return applied
 end
 
---- Send on-screen HUD notification to the player
+-- Horizon stabilization step (Non-Acro / Angle Mode)
+local function StepStabilizer()
+    if State.CurrentMode ~= "NON_ACRO" then
+        return
+    end
+
+    local Pawn = State.CachedPawn
+    if not Pawn or not Pawn:IsValid() then
+        return
+    end
+
+    local PhysComp = State.CachedPhysComp
+    if not PhysComp or not PhysComp:IsValid() then
+        State.CachedPhysComp = FindDronePhysicsComponent(Pawn)
+        PhysComp = State.CachedPhysComp
+        if not PhysComp or not PhysComp:IsValid() then
+            return
+        end
+    end
+
+    pcall(function()
+        local Rot = Pawn:K2_GetActorRotation()
+        if not Rot then return end
+
+        local roll = Rot.Roll
+        local pitch = Rot.Pitch
+
+        -- Wrap angles to -180 .. +180
+        if roll > 180.0 then roll = roll - 360.0 end
+        if roll < -180.0 then roll = roll + 360.0 end
+        if pitch > 180.0 then pitch = pitch - 360.0 end
+        if pitch < -180.0 then pitch = pitch + 360.0 end
+
+        -- Target angular velocities to return to level (0 Roll, 0 Pitch)
+        local targetRollRate = -roll * Config.StabilizerStrength
+        local targetPitchRate = -pitch * Config.StabilizerStrength
+
+        -- Clamp max corrective angular rate (degrees/sec)
+        local maxRate = 220.0
+        targetRollRate = math.max(-maxRate, math.min(maxRate, targetRollRate))
+        targetPitchRate = math.max(-maxRate, math.min(maxRate, targetPitchRate))
+
+        if PhysComp.GetPhysicsAngularVelocityInDegrees and PhysComp.SetPhysicsAngularVelocityInDegrees then
+            local currAngVel = PhysComp:GetPhysicsAngularVelocityInDegrees()
+            if currAngVel then
+                local alpha = Config.Damping or 0.35
+                local newRollVel = currAngVel.X + (targetRollRate - currAngVel.X) * alpha
+                local newPitchVel = currAngVel.Y + (targetPitchRate - currAngVel.Y) * alpha
+
+                PhysComp:SetPhysicsAngularVelocityInDegrees(
+                    { X = newRollVel, Y = newPitchVel, Z = currAngVel.Z },
+                    false,
+                    "None"
+                )
+            end
+        end
+    end)
+end
+
+-- Start or stop the active stabilizer loop
+local function EnsureStabilizerLoop()
+    if State.CurrentMode == "NON_ACRO" and not State.IsLoopRunning then
+        State.IsLoopRunning = true
+        LoopAsync(20, function()
+            if State.CurrentMode ~= "NON_ACRO" then
+                State.IsLoopRunning = false
+                return true -- Stop loop
+            end
+
+            ExecuteInGameThread(function()
+                StepStabilizer()
+            end)
+
+            return false -- Keep looping while in NON_ACRO
+        end)
+    end
+end
+
+-- Send HUD feedback to player
 local function NotifyPlayer(msg)
     Log(msg)
     if not Config.ShowOnScreenMessage then return end
 
     ExecuteInGameThread(function()
-        local PC = GetActivePlayerController()
-        if PC and PC:IsValid() then
+        local pc = State.CachedPlayerController
+        if not pc or not pc:IsValid() then
+            local ok, newPc = pcall(function() return UEHelpers.GetPlayerController() end)
+            if ok and newPc and newPc:IsValid() then
+                pc = newPc
+                State.CachedPlayerController = newPc
+            end
+        end
+
+        if pc and pc:IsValid() then
             pcall(function()
-                if PC.ClientMessage then
-                    PC:ClientMessage(msg)
+                if pc.ClientMessage then
+                    pc:ClientMessage(msg)
                 end
             end)
         end
     end)
 end
 
---- Start transition if smooth transition is enabled, or apply immediately
-local function StartTransition()
-    if not Config.SmoothTransition then
-        State.CurrentFOV = State.TargetFOV
-        ExecuteInGameThread(function()
-            ApplyCameraFOV(State.TargetFOV)
-        end)
-        return
-    end
-
-    if State.IsTransitioning then
-        -- Already running transition loop, it will pick up the new TargetFOV
-        return
-    end
-
-    State.IsTransitioning = true
-
-    -- Finite LoopAsync: only runs during active camera movement and shuts down when done!
-    LoopAsync(20, function()
-        if not State.IsTransitioning then
-            return true -- Stop loop
-        end
-
-        local shouldStop = false
-        ExecuteInGameThread(function()
-            local diff = State.TargetFOV - State.CurrentFOV
-            if math.abs(diff) > 0.5 then
-                local step = diff * math.min(1.0, Config.TransitionSpeed * 0.020)
-                if math.abs(step) < 0.25 then
-                    step = (diff > 0) and 0.25 or -0.25
-                end
-                State.CurrentFOV = State.CurrentFOV + step
-                ApplyCameraFOV(State.CurrentFOV)
-            else
-                State.CurrentFOV = State.TargetFOV
-                ApplyCameraFOV(State.TargetFOV)
-                State.IsTransitioning = false
-                shouldStop = true
-            end
-        end)
-
-        return shouldStop
-    end)
-end
-
---- Toggle between Macro (Zoomed) and Non-Macro (Wide FPV)
-local function ToggleCameraMode()
-    if State.CurrentMode == "MACRO" then
-        State.CurrentMode = "NON_MACRO"
-        State.TargetFOV = Config.NonMacroFOV
-        NotifyPlayer(string.format("[FPV Camera] Mode: NON-MACRO (Wide FPV: %.0f deg)", State.TargetFOV))
+--- Toggle between Acro and Non-Acro modes
+local function ToggleFlightMode()
+    if State.CurrentMode == "ACRO" then
+        State.CurrentMode = "NON_ACRO"
+        ApplyNativeMode(true)
+        EnsureStabilizerLoop()
+        NotifyPlayer("[FLIGHT MODE] >> NON-ACRO << (Angle / Stabilized Horizon)")
     else
-        State.CurrentMode = "MACRO"
-        State.TargetFOV = State.InitialDroneFOV or Config.MacroFOV
-        NotifyPlayer(string.format("[FPV Camera] Mode: MACRO (Zoom / Strike: %.0f deg)", State.TargetFOV))
+        State.CurrentMode = "ACRO"
+        ApplyNativeMode(false)
+        -- Loop will self-terminate on next tick
+        NotifyPlayer("[FLIGHT MODE] >> ACRO << (Full Manual / Rate Mode)")
     end
-
-    StartTransition()
-end
-
---- Adjust FOV up or down dynamically
-local function AdjustFOV(delta)
-    State.TargetFOV = math.max(Config.MinFOV, math.min(Config.MaxFOV, State.TargetFOV + delta))
-    NotifyPlayer(string.format("[FPV Camera] FOV: %.0f deg (%s)", State.TargetFOV, State.CurrentMode))
-    StartTransition()
 end
 
 -- Keybind registrations
@@ -229,28 +258,34 @@ local function BindKey(key, callback)
     end)
 end
 
-BindKey(Config.ToggleKey, ToggleCameraMode)
-BindKey(Config.AltToggleKey, ToggleCameraMode)
-BindKey(Config.FovIncreaseKey, function() AdjustFOV(Config.FovStep) end)
-BindKey(Config.FovDecreaseKey, function() AdjustFOV(-Config.FovStep) end)
-BindKey(Config.AltFovIncreaseKey, function() AdjustFOV(Config.FovStep) end)
-BindKey(Config.AltFovDecreaseKey, function() AdjustFOV(-Config.FovStep) end)
+BindKey(Config.ToggleKey, ToggleFlightMode)
+BindKey(Config.AltToggleKey, ToggleFlightMode)
 
--- Hook PlayerController:ClientRestart to track when player takes control of a drone
+-- Hook PlayerController:ClientRestart to track when player possesses the drone
 pcall(function()
     RegisterHook("/Script/Engine.PlayerController:ClientRestart", function(self, NewPawn)
         local pc = self:get()
         if pc and pc:IsValid() then
             State.CachedPlayerController = pc
-            if NewPawn and NewPawn:IsValid() then
-                State.CachedPawn = NewPawn:get()
-            elseif pc.Pawn and pc.Pawn:IsValid() then
-                State.CachedPawn = pc.Pawn
+            local pawn = NewPawn and NewPawn:IsValid() and NewPawn:get() or pc.Pawn
+            if pawn and pawn:IsValid() then
+                State.CachedPawn = pawn
+                State.CachedPhysComp = FindDronePhysicsComponent(pawn)
+                State.NativeCandidates = ScanForNativeFlightMode(pawn)
+                Log(string.format("Drone pawn initialized: %s (PhysComp: %s)",
+                    pawn:GetFullName(),
+                    State.CachedPhysComp and State.CachedPhysComp:GetFullName() or "none"))
+
+                -- Apply current mode to new pawn
+                if State.CurrentMode == "NON_ACRO" then
+                    ApplyNativeMode(true)
+                    EnsureStabilizerLoop()
+                else
+                    ApplyNativeMode(false)
+                end
             end
-            Log(string.format("PlayerController restarted with Pawn: %s",
-                State.CachedPawn and State.CachedPawn:GetFullName() or "none"))
         end
     end)
 end)
 
-print("[FPVCameraMod] FPV Camera Switcher Mod loaded successfully! Press 'V' or 'C' in flight to toggle Macro / Non-Macro.\n")
+print("[FPVFlightMode] Mod loaded! Press 'V' or 'C' in flight to switch between ACRO and NON-ACRO.\n")

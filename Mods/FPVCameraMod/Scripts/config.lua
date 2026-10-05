@@ -1,39 +1,28 @@
--- FPV Camera Mod Configuration
--- FPV Kamikaze Drone: Macro / Non-Macro Camera Switcher
+-- FPV Flight Mode Configuration
+-- FPV Kamikaze Drone: Acro <-> Non-Acro (Angle / Stabilized) Switcher
 
 local Config = {}
 
 -- Key bindings:
--- Toggle between Macro (narrow/zoom) and Non-Macro (wide FPV):
+-- Toggle between Acro (manual rate) and Non-Acro (stabilized / angle mode):
 Config.ToggleKey = Key.V
 Config.AltToggleKey = Key.C
 
--- Fine adjustment keys:
--- In UE4SS Key enum: OEM_SIX is ']', OEM_FOUR is '[', ADD/SUBTRACT are numpad +/-
-Config.FovIncreaseKey = Key.OEM_SIX or Key.ADD
-Config.FovDecreaseKey = Key.OEM_FOUR or Key.SUBTRACT
-Config.AltFovIncreaseKey = Key.ADD
-Config.AltFovDecreaseKey = Key.SUBTRACT
+-- Default flight mode on start:
+-- Options: "ACRO" (pure manual / rate mode) or "NON_ACRO" (self-leveling / angle mode)
+Config.DefaultMode = "ACRO"
 
--- Camera FOV presets (degrees):
--- Macro mode (default narrow/zoomed view for precision targeting):
-Config.MacroFOV = 65.0
+-- Non-Acro (Angle Mode) Stabilizer Tuning:
+-- Responsiveness of returning to level (higher = snaps to horizon faster):
+Config.StabilizerStrength = 4.5
 
--- Non-Macro mode (wide-angle FPV view for navigation and flight awareness):
-Config.NonMacroFOV = 115.0
+-- Damping factor (smoothness of leveling, 0.1 to 0.5):
+Config.Damping = 0.35
 
--- Step size when adjusting FOV manually:
-Config.FovStep = 5.0
+-- Maximum tilt angle allowed in Non-Acro mode (degrees):
+Config.MaxTiltAngle = 50.0
 
--- Minimum and maximum allowable FOV:
-Config.MinFOV = 40.0
-Config.MaxFOV = 140.0
-
--- Smooth FOV transitions (true = smoothly interpolate, false = instant snap):
-Config.SmoothTransition = true
-Config.TransitionSpeed = 10.0 -- Higher = faster transition
-
--- On-screen notification:
+-- On-screen HUD notification when switching modes:
 Config.ShowOnScreenMessage = true
 
 return Config

@@ -1,4 +1,4 @@
-# FPV Kamikaze Drone - Camera Macro/Normal Switch Mod - MODLOG
+# FPV Kamikaze Drone - Flight Mode Mod (Acro <-> Non-Acro / Stabilized) - MODLOG
 
 ## Project Overview
 - **Game:** FPV Kamikaze Drone (Steam AppID: 2707940, Build ID: 23452483)
@@ -7,7 +7,8 @@
 - **Mod Directory:** `/home/root2506/FPVKamikazeDrone-CameraMod`
 - **Save / Config Path:** `~/snap/steam/common/.local/share/Steam/steamapps/compatdata/2707940/pfx/drive_c/users/steamuser/AppData/Local/FPVKamikazeDrone/Saved/Config/Windows`
 - **Backup File:** `/home/root2506/.universal-modder/backups/fpvkamikazedrone-saves/20261005-230303.zip` (15 files, 0.5 MB)
-- **Goal:** Mod allowing the player to toggle/switch camera mode between "Macro" (telephoto / zoom / narrow FOV for reconnaissance and target acquisition) and "Non-Macro" (standard wide-angle FPV FOV for maneuvering and flight).
+- **Goal:** Mod allowing the player to toggle/switch flight mode between **Acro** (full manual rate mode, standard combat FPV without self-leveling) and **Non-Acro** (Angle / Stabilized mode with automatic horizon self-leveling to keep the drone level and prevent flipping).
+
 
 ## Recon & Architecture
 - **Engine Details:** Unreal Engine 5.6 (Windows x64 via Proton / Steam).
@@ -36,9 +37,11 @@
   - `enabled.txt` & registered in `mods.txt`.
 
 ## Controls & Keybindings
-- **Toggle Mode (`V` or `C`):** Switch between **Macro** (Zoomed / narrow ~65° FOV) and **Non-Macro** (Wide FPV ~115° FOV).
-- **Fine Adjustment (`]` / `[`):** Increase / decrease FOV by ±5° on the fly.
-- **Customization:** Settings can be customized at any time in `ue4ss/Mods/FPVCameraMod/Scripts/config.lua`.
+- **Toggle Flight Mode (`V` or `C`):** Switch between:
+  - **Acro Mode:** Full manual rate control (standard combat FPV flight, no auto-leveling).
+  - **Non-Acro Mode:** Angle / Horizon stabilized mode (automatic self-leveling to 0° Roll & Pitch when controls are neutral).
+- **Customization:** Settings can be customized in `ue4ss/Mods/FPVCameraMod/Scripts/config.lua` (`StabilizerStrength`, `Damping`, `MaxTiltAngle`).
+
 
 ## Safety & Process Hygiene
 - Save and config backup created: `~/.universal-modder/backups/fpvkamikazedrone-saves/20261005-230303.zip`.

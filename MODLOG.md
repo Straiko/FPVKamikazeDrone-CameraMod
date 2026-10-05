@@ -64,5 +64,17 @@
    - **Root Cause:** In `main.lua:256`, `NewPawn` in the `ClientRestart` hook was treated as a `UObject` and called `:IsValid()`, but in UE4SS it is a `RemoteUnrealParam<APawn>` which only has `:get()`. This caused the hook callback to fail silently, so `State.CachedPawn` and `State.CachedCameraComponent` were never initialized. As a result, pressing `V` printed the toggle message but did not modify the postprocess blendables.
    - **Fix:** Safely extracted the pawn using `NewPawn:get()` with fallback to `pc.Pawn` / `pc.AcknowledgedPawn`. Added on-demand resolution in `ApplyNoiseState` to automatically discover the drone pawn, camera components, postprocess components, and map postprocess volumes whenever the toggle key is pressed.
 
+4. **Noise Persistence Analysis & Complete Elimination (2026-10-05):**
+   - **Root Cause:**
+     1. In UE4SS Lua, iterating `TArray<FWeightedBlendable>` via `:ForEach()` yields a struct copy by value; assigning `elem.Weight = 0` did not write back into the native C++ array memory.
+     2. `cam.PostProcessSettings.bOverride_WeightedBlendables` remained `true`, causing Unreal Engine to continue evaluating the CRT/VCR postprocess material (`PP_Preset_FPV` / `PP_Preset_Spectator` / `00_animated_crt_v2_1_pp`).
+     3. An aggressive 50ms polling loop was spamming `GUObjectArray` lookups and flooding `UE4SS.log`.
+   - **Fix:**
+     1. Executed engine-level console command `r.PostProcessing.DisableMaterials 1` and `show PostProcessMaterials 0` in Non-Acro mode, which completely skips all postprocess materials in the rendering pipeline (guaranteeing 0 ripples, 0 scanlines, 0 static). Restored via `r.PostProcessing.DisableMaterials 0` and `show PostProcessMaterials 1` in Acro mode.
+     2. Directly toggled `bOverride_WeightedBlendables = false` on `CameraComponent`, `PlayerCameraManager`, and all `PostProcessVolume` / `PostProcessComponent` actors in the level.
+     3. Added handling for UMG `RetainerBox` filters and `MaterialInstanceDynamic` scalar parameters (`Master`, `Noise`, `Interference`, `Scanline`, `Distortion`, etc.).
+     4. Eliminated the 50ms polling loop and log spam, replacing it with an event-driven toggle and a silent low-overhead 2s maintenance check.
+     5. Enabled `EnableHotReloadSystem = 1` and `EnableAutoReloadingLuaMods = 1` in `UE4SS-settings.ini`.
+
 
 

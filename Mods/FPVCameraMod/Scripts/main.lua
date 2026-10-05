@@ -1,211 +1,194 @@
--- FPV Kamikaze Drone - Flight Mode Switcher (Acro <-> Non-Acro / Stabilized)
--- Allows players to switch between:
--- 1. ACRO MODE: Full manual rate mode (default FPV, no self-leveling).
--- 2. NON-ACRO MODE: Angle / Stabilized mode (automatic horizon self-leveling).
+-- FPV Kamikaze Drone - Visual & Camera Mode Switcher
+-- Переключение между:
+-- 1. "АКРО" (Картинка рябит): аналоговый FPV с помехами, рябью и CRT/VCR эффектами.
+-- 2. "НЕ-АКРО" (Обычная чистая картинка без помех): кристально чистый цифровой вид.
 
 local UEHelpers = require("UEHelpers")
 local Config = require("config")
 
-print("[FPVFlightMode] Initializing Acro / Non-Acro Flight Mode Switcher...\n")
+print("[FPVCameraMod] Initializing Acro (Noise) <-> Non-Acro (Clean) Switcher...\n")
 
 local State = {
     CurrentMode = Config.DefaultMode or "ACRO", -- "ACRO" or "NON_ACRO"
     CachedPlayerController = nil,
     CachedPawn = nil,
-    CachedPhysComp = nil,
-    NativeCandidates = {},
+    CachedCameraComponent = nil,
+    CachedPostProcessComponents = {},
     IsLoopRunning = false,
     LastNotificationTime = 0
 }
 
 local function Log(msg)
-    print(string.format("[FPVFlightMode] %s\n", msg))
+    print(string.format("[FPVCameraMod] %s\n", msg))
 end
 
--- Safely find the simulated physics component on the drone
-local function FindDronePhysicsComponent(Pawn)
-    if not Pawn or not Pawn:IsValid() then return nil end
+-- Find camera components on the drone pawn
+local function CachePawnComponents(Pawn)
+    if not Pawn or not Pawn:IsValid() then return end
 
-    -- 1. Check RootComponent
+    State.CachedCameraComponent = nil
+    State.CachedPostProcessComponents = {}
+
+    -- Direct CameraComponent
     pcall(function()
-        if Pawn.RootComponent and Pawn.RootComponent:IsValid() then
-            local root = Pawn.RootComponent
-            if root.IsSimulatingPhysics and root:IsSimulatingPhysics() then
-                return root
-            end
+        if Pawn.CameraComponent and Pawn.CameraComponent:IsValid() then
+            State.CachedCameraComponent = Pawn.CameraComponent
+        elseif Pawn.Camera and Pawn.Camera:IsValid() then
+            State.CachedCameraComponent = Pawn.Camera
         end
     end)
 
-    -- 2. Check Mesh
+    -- Scan for CameraComponent by class
     pcall(function()
-        if Pawn.Mesh and Pawn.Mesh:IsValid() then
-            local mesh = Pawn.Mesh
-            if mesh.IsSimulatingPhysics and mesh:IsSimulatingPhysics() then
-                return mesh
-            end
-        end
-    end)
-
-    -- 3. Fallback: check any PrimitiveComponent on Pawn
-    local PrimitiveClass = StaticFindObject("/Script/Engine.PrimitiveComponent")
-    if PrimitiveClass and PrimitiveClass:IsValid() and Pawn.K2_GetComponentsByClass then
-        local comps = Pawn:K2_GetComponentsByClass(PrimitiveClass)
-        if comps and comps:IsValid() and comps.ForEach then
-            local found = nil
-            comps:ForEach(function(index, comp)
-                if not found and comp and comp:IsValid() and comp.IsSimulatingPhysics and comp:IsSimulatingPhysics() then
-                    found = comp
-                end
-            end)
-            if found then return found end
-        end
-    end
-
-    return Pawn.RootComponent
-end
-
--- Scan Pawn and Components for native stabilization / flight mode variables
-local function ScanForNativeFlightMode(Pawn)
-    if not Pawn or not Pawn:IsValid() then return {} end
-
-    local candidates = {}
-
-    -- Scan Pawn properties
-    pcall(function()
-        local class = Pawn:GetClass()
-        while class and class:IsValid() do
-            class:ForEachProperty(function(prop)
-                local name = prop:GetFName():ToString():lower()
-                if name:find("stabiliz") or name:find("acro") or name:find("angle") or name:find("flightmode") then
-                    Log(string.format("Discovered native Pawn property: %s", prop:GetFName():ToString()))
-                    table.insert(candidates, { Object = Pawn, PropertyName = prop:GetFName():ToString() })
-                end
-            end)
-            class = class:GetSuperClass()
-        end
-    end)
-
-    -- Scan components (e.g. BP_IMUComponent)
-    pcall(function()
-        local ActorComponentClass = StaticFindObject("/Script/Engine.ActorComponent")
-        if ActorComponentClass and ActorComponentClass:IsValid() and Pawn.K2_GetComponentsByClass then
-            local comps = Pawn:K2_GetComponentsByClass(ActorComponentClass)
+        local CamClass = StaticFindObject("/Script/Engine.CameraComponent")
+        if CamClass and CamClass:IsValid() and Pawn.K2_GetComponentsByClass then
+            local comps = Pawn:K2_GetComponentsByClass(CamClass)
             if comps and comps:IsValid() and comps.ForEach then
                 comps:ForEach(function(idx, comp)
-                    if comp and comp:IsValid() then
-                        local cClass = comp:GetClass()
-                        local cName = cClass:GetFName():ToString()
-                        while cClass and cClass:IsValid() do
-                            cClass:ForEachProperty(function(prop)
-                                local name = prop:GetFName():ToString():lower()
-                                if name:find("stabiliz") or name:find("acro") or name:find("angle") or name:find("flightmode") then
-                                    Log(string.format("Discovered component property: %s.%s", cName, prop:GetFName():ToString()))
-                                    table.insert(candidates, { Object = comp, ComponentName = cName, PropertyName = prop:GetFName():ToString() })
-                                end
-                            end)
-                            cClass = cClass:GetSuperClass()
-                        end
+                    if comp and comp:IsValid() and not State.CachedCameraComponent then
+                        State.CachedCameraComponent = comp
                     end
                 end)
             end
         end
     end)
 
-    return candidates
+    -- Scan for PostProcessComponent by class
+    pcall(function()
+        local PPClass = StaticFindObject("/Script/Engine.PostProcessComponent")
+        if PPClass and PPClass:IsValid() and Pawn.K2_GetComponentsByClass then
+            local comps = Pawn:K2_GetComponentsByClass(PPClass)
+            if comps and comps:IsValid() and comps.ForEach then
+                comps:ForEach(function(idx, comp)
+                    if comp and comp:IsValid() then
+                        table.insert(State.CachedPostProcessComponents, comp)
+                    end
+                end)
+            end
+        end
+    end)
+
+    Log(string.format("Cached components for %s (Camera: %s, PP Comps: %d)",
+        Pawn:GetFullName(),
+        State.CachedCameraComponent and State.CachedCameraComponent:GetFullName() or "none",
+        #State.CachedPostProcessComponents))
 end
 
--- Apply flight mode to native properties if available
-local function ApplyNativeMode(IsNonAcro)
-    for _, candidate in ipairs(State.NativeCandidates) do
+-- Apply or remove noise, scanlines, and CRT distortion
+local function ApplyNoiseState(enableNoise)
+    local targetWeight = enableNoise and 1.0 or 0.0
+
+    -- 1. CameraComponent PostProcess Settings & Blendables
+    local cam = State.CachedCameraComponent
+    if cam and cam:IsValid() then
         pcall(function()
-            if candidate.Object and candidate.Object:IsValid() then
-                local propName = candidate.PropertyName
-                local lowerName = propName:lower()
-                if lowerName:find("acro") then
-                    candidate.Object[propName] = not IsNonAcro
-                else
-                    candidate.Object[propName] = IsNonAcro
+            cam.PostProcessBlendWeight = targetWeight
+
+            if cam.PostProcessSettings and cam.PostProcessSettings.WeightedBlendables then
+                local arr = cam.PostProcessSettings.WeightedBlendables.Array
+                if arr and arr.ForEach then
+                    arr:ForEach(function(idx, elem)
+                        pcall(function()
+                            if elem and elem.Weight then
+                                elem.Weight = targetWeight
+                            end
+                        end)
+                    end)
                 end
-                Log(string.format("Applied native property %s = %s", propName, tostring(candidate.Object[propName])))
+            end
+        end)
+    end
+
+    -- 2. PostProcess Components on Pawn
+    for _, ppComp in ipairs(State.CachedPostProcessComponents) do
+        if ppComp and ppComp:IsValid() then
+            pcall(function()
+                ppComp.bEnabled = enableNoise
+                ppComp.BlendWeight = targetWeight
+                if ppComp.Settings and ppComp.Settings.WeightedBlendables then
+                    local arr = ppComp.Settings.WeightedBlendables.Array
+                    if arr and arr.ForEach then
+                        arr:ForEach(function(idx, elem)
+                            pcall(function()
+                                if elem and elem.Weight then
+                                    elem.Weight = targetWeight
+                                end
+                            end)
+                        end)
+                    end
+                end
+            end)
+        end
+    end
+
+    -- 3. PlayerCameraManager
+    local pc = State.CachedPlayerController
+    if pc and pc:IsValid() then
+        pcall(function()
+            local mgr = pc.PlayerCameraManager
+            if mgr and mgr:IsValid() then
+                if mgr.PostProcessSettings and mgr.PostProcessSettings.WeightedBlendables then
+                    local arr = mgr.PostProcessSettings.WeightedBlendables.Array
+                    if arr and arr.ForEach then
+                        arr:ForEach(function(idx, elem)
+                            pcall(function()
+                                if elem and elem.Weight then
+                                    elem.Weight = targetWeight
+                                end
+                            end)
+                        end)
+                    end
+                end
+            end
+        end)
+    end
+
+    -- 4. Optional flight stabilizer (if enabled in config)
+    if Config.AlsoStabilizeFlight and not enableNoise then
+        pcall(function()
+            local pawn = State.CachedPawn
+            if pawn and pawn:IsValid() and pawn.RootComponent and pawn.RootComponent:IsValid() then
+                local rot = pawn:K2_GetActorRotation()
+                if rot then
+                    local roll = rot.Roll > 180 and (rot.Roll - 360) or rot.Roll
+                    local pitch = rot.Pitch > 180 and (rot.Pitch - 360) or rot.Pitch
+                    local targetRollRate = math.max(-180, math.min(180, -roll * (Config.StabilizerStrength or 4.0)))
+                    local targetPitchRate = math.max(-180, math.min(180, -pitch * (Config.StabilizerStrength or 4.0)))
+                    local angVel = pawn.RootComponent:GetPhysicsAngularVelocityInDegrees()
+                    if angVel then
+                        local alpha = Config.Damping or 0.35
+                        pawn.RootComponent:SetPhysicsAngularVelocityInDegrees(
+                            {
+                                X = angVel.X + (targetRollRate - angVel.X) * alpha,
+                                Y = angVel.Y + (targetPitchRate - angVel.Y) * alpha,
+                                Z = angVel.Z
+                            },
+                            false,
+                            "None"
+                        )
+                    end
+                end
             end
         end)
     end
 end
 
--- Horizon stabilization step (Non-Acro / Angle Mode)
-local function StepStabilizer()
-    if State.CurrentMode ~= "NON_ACRO" then
-        return
-    end
-
-    local Pawn = State.CachedPawn
-    if not Pawn or not Pawn:IsValid() then
-        return
-    end
-
-    local PhysComp = State.CachedPhysComp
-    if not PhysComp or not PhysComp:IsValid() then
-        State.CachedPhysComp = FindDronePhysicsComponent(Pawn)
-        PhysComp = State.CachedPhysComp
-        if not PhysComp or not PhysComp:IsValid() then
-            return
-        end
-    end
-
-    pcall(function()
-        local Rot = Pawn:K2_GetActorRotation()
-        if not Rot then return end
-
-        local roll = Rot.Roll
-        local pitch = Rot.Pitch
-
-        -- Wrap angles to -180 .. +180
-        if roll > 180.0 then roll = roll - 360.0 end
-        if roll < -180.0 then roll = roll + 360.0 end
-        if pitch > 180.0 then pitch = pitch - 360.0 end
-        if pitch < -180.0 then pitch = pitch + 360.0 end
-
-        -- Target angular velocities to return to level (0 Roll, 0 Pitch)
-        local targetRollRate = -roll * Config.StabilizerStrength
-        local targetPitchRate = -pitch * Config.StabilizerStrength
-
-        -- Clamp max corrective angular rate (degrees/sec)
-        local maxRate = 220.0
-        targetRollRate = math.max(-maxRate, math.min(maxRate, targetRollRate))
-        targetPitchRate = math.max(-maxRate, math.min(maxRate, targetPitchRate))
-
-        if PhysComp.GetPhysicsAngularVelocityInDegrees and PhysComp.SetPhysicsAngularVelocityInDegrees then
-            local currAngVel = PhysComp:GetPhysicsAngularVelocityInDegrees()
-            if currAngVel then
-                local alpha = Config.Damping or 0.35
-                local newRollVel = currAngVel.X + (targetRollRate - currAngVel.X) * alpha
-                local newPitchVel = currAngVel.Y + (targetPitchRate - currAngVel.Y) * alpha
-
-                PhysComp:SetPhysicsAngularVelocityInDegrees(
-                    { X = newRollVel, Y = newPitchVel, Z = currAngVel.Z },
-                    false,
-                    "None"
-                )
-            end
-        end
-    end)
-end
-
--- Start or stop the active stabilizer loop
-local function EnsureStabilizerLoop()
+-- Lightweight enforcement loop: ensures the clean picture stays clean
+-- even if the game tries to re-apply signal noise based on distance/battery
+local function EnsureNonAcroEnforcementLoop()
     if State.CurrentMode == "NON_ACRO" and not State.IsLoopRunning then
         State.IsLoopRunning = true
-        LoopAsync(20, function()
+        LoopAsync(33, function() -- ~30 updates per sec while in Non-Acro
             if State.CurrentMode ~= "NON_ACRO" then
                 State.IsLoopRunning = false
                 return true -- Stop loop
             end
 
             ExecuteInGameThread(function()
-                StepStabilizer()
+                ApplyNoiseState(false)
             end)
 
-            return false -- Keep looping while in NON_ACRO
+            return false
         end)
     end
 end
@@ -235,18 +218,21 @@ local function NotifyPlayer(msg)
     end)
 end
 
---- Toggle between Acro and Non-Acro modes
-local function ToggleFlightMode()
+--- Toggle between Acro (рябь) and Non-Acro (чистая картинка)
+local function ToggleMode()
     if State.CurrentMode == "ACRO" then
         State.CurrentMode = "NON_ACRO"
-        ApplyNativeMode(true)
-        EnsureStabilizerLoop()
-        NotifyPlayer("[FLIGHT MODE] >> NON-ACRO << (Angle / Stabilized Horizon)")
+        ExecuteInGameThread(function()
+            ApplyNoiseState(false)
+        end)
+        EnsureNonAcroEnforcementLoop()
+        NotifyPlayer("[РЕЖИМ] >> НЕ-АКРО << (Чистая картинка без помех и ряби)")
     else
         State.CurrentMode = "ACRO"
-        ApplyNativeMode(false)
-        -- Loop will self-terminate on next tick
-        NotifyPlayer("[FLIGHT MODE] >> ACRO << (Full Manual / Rate Mode)")
+        ExecuteInGameThread(function()
+            ApplyNoiseState(true)
+        end)
+        NotifyPlayer("[РЕЖИМ] >> АКРО << (Аналоговый FPV / Рябь и помехи ВКЛ)")
     end
 end
 
@@ -258,8 +244,8 @@ local function BindKey(key, callback)
     end)
 end
 
-BindKey(Config.ToggleKey, ToggleFlightMode)
-BindKey(Config.AltToggleKey, ToggleFlightMode)
+BindKey(Config.ToggleKey, ToggleMode)
+BindKey(Config.AltToggleKey, ToggleMode)
 
 -- Hook PlayerController:ClientRestart to track when player possesses the drone
 pcall(function()
@@ -270,22 +256,18 @@ pcall(function()
             local pawn = NewPawn and NewPawn:IsValid() and NewPawn:get() or pc.Pawn
             if pawn and pawn:IsValid() then
                 State.CachedPawn = pawn
-                State.CachedPhysComp = FindDronePhysicsComponent(pawn)
-                State.NativeCandidates = ScanForNativeFlightMode(pawn)
-                Log(string.format("Drone pawn initialized: %s (PhysComp: %s)",
-                    pawn:GetFullName(),
-                    State.CachedPhysComp and State.CachedPhysComp:GetFullName() or "none"))
+                CachePawnComponents(pawn)
 
                 -- Apply current mode to new pawn
                 if State.CurrentMode == "NON_ACRO" then
-                    ApplyNativeMode(true)
-                    EnsureStabilizerLoop()
+                    ApplyNoiseState(false)
+                    EnsureNonAcroEnforcementLoop()
                 else
-                    ApplyNativeMode(false)
+                    ApplyNoiseState(true)
                 end
             end
         end
     end)
 end)
 
-print("[FPVFlightMode] Mod loaded! Press 'V' or 'C' in flight to switch between ACRO and NON-ACRO.\n")
+print("[FPVCameraMod] Mod loaded! Press 'V' or 'C' in flight to toggle between Acro (рябь) and Non-Acro (чистая картинка).\n")

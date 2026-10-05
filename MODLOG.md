@@ -1,4 +1,4 @@
-# FPV Kamikaze Drone - Flight Mode Mod (Acro <-> Non-Acro / Stabilized) - MODLOG
+# FPV Kamikaze Drone - Visual Noise & Camera Mod (Acro <-> Non-Acro) - MODLOG
 
 ## Project Overview
 - **Game:** FPV Kamikaze Drone (Steam AppID: 2707940, Build ID: 23452483)
@@ -7,7 +7,8 @@
 - **Mod Directory:** `/home/root2506/FPVKamikazeDrone-CameraMod`
 - **Save / Config Path:** `~/snap/steam/common/.local/share/Steam/steamapps/compatdata/2707940/pfx/drive_c/users/steamuser/AppData/Local/FPVKamikazeDrone/Saved/Config/Windows`
 - **Backup File:** `/home/root2506/.universal-modder/backups/fpvkamikazedrone-saves/20261005-230303.zip` (15 files, 0.5 MB)
-- **Goal:** Mod allowing the player to toggle/switch flight mode between **Acro** (full manual rate mode, standard combat FPV without self-leveling) and **Non-Acro** (Angle / Stabilized mode with automatic horizon self-leveling to keep the drone level and prevent flipping).
+- **Goal:** Mod allowing the player to toggle/switch camera mode between **"Acro"** (рябь / помехи: CRT/VCR VHS distortion, analog noise, and scanlines) and **"Non-Acro"** (обычная чистая картинка без помех: clean digital view with 0 post-process static).
+
 
 
 ## Recon & Architecture
@@ -37,10 +38,11 @@
   - `enabled.txt` & registered in `mods.txt`.
 
 ## Controls & Keybindings
-- **Toggle Flight Mode (`V` or `C`):** Switch between:
-  - **Acro Mode:** Full manual rate control (standard combat FPV flight, no auto-leveling).
-  - **Non-Acro Mode:** Angle / Horizon stabilized mode (automatic self-leveling to 0° Roll & Pitch when controls are neutral).
-- **Customization:** Settings can be customized in `ue4ss/Mods/FPVCameraMod/Scripts/config.lua` (`StabilizerStrength`, `Damping`, `MaxTiltAngle`).
+- **Toggle Mode (`V` or `C`):** Switch between:
+  - **Acro Mode:** Аналоговый FPV видеосигнал с помехами, рябью и полосами (`PP_Preset_FPV` / `00_animated_crt_v2_1_pp`).
+  - **Non-Acro Mode:** Чистая цифровая картинка без помех и ряби (`PostProcessBlendWeight = 0.0`, `WeightedBlendables.Weight = 0.0`).
+- **Customization:** Settings can be customized in `ue4ss/Mods/FPVCameraMod/Scripts/config.lua` (`ToggleNoise`, `AlsoStabilizeFlight`, `DefaultMode`).
+
 
 
 ## Safety & Process Hygiene

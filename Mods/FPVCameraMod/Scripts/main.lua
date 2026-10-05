@@ -22,27 +22,57 @@ local function Log(msg)
     print(string.format("[FPVCameraMod] %s\n", msg))
 end
 
--- Find camera components on the drone pawn
-local function CachePawnComponents(Pawn)
-    if not Pawn or not Pawn:IsValid() then return end
+-- Safely get active PlayerController
+local function GetPlayerController()
+    if State.CachedPlayerController and State.CachedPlayerController:IsValid() then
+        return State.CachedPlayerController
+    end
+    local ok, pc = pcall(function() return UEHelpers.GetPlayerController() end)
+    if ok and pc and pc:IsValid() then
+        State.CachedPlayerController = pc
+        return pc
+    end
+    return nil
+end
+
+-- Safely get active Drone Pawn
+local function GetPawn()
+    if State.CachedPawn and State.CachedPawn:IsValid() then
+        return State.CachedPawn
+    end
+    local pc = GetPlayerController()
+    if pc and pc:IsValid() then
+        local p = pc.Pawn or pc.AcknowledgedPawn
+        if p and p:IsValid() then
+            State.CachedPawn = p
+            return p
+        end
+    end
+    return nil
+end
+
+-- Refresh camera and post-process component references
+local function RefreshPawnComponents()
+    local pawn = GetPawn()
+    if not pawn or not pawn:IsValid() then return end
 
     State.CachedCameraComponent = nil
     State.CachedPostProcessComponents = {}
 
     -- Direct CameraComponent
     pcall(function()
-        if Pawn.CameraComponent and Pawn.CameraComponent:IsValid() then
-            State.CachedCameraComponent = Pawn.CameraComponent
-        elseif Pawn.Camera and Pawn.Camera:IsValid() then
-            State.CachedCameraComponent = Pawn.Camera
+        if pawn.CameraComponent and pawn.CameraComponent:IsValid() then
+            State.CachedCameraComponent = pawn.CameraComponent
+        elseif pawn.Camera and pawn.Camera:IsValid() then
+            State.CachedCameraComponent = pawn.Camera
         end
     end)
 
     -- Scan for CameraComponent by class
     pcall(function()
         local CamClass = StaticFindObject("/Script/Engine.CameraComponent")
-        if CamClass and CamClass:IsValid() and Pawn.K2_GetComponentsByClass then
-            local comps = Pawn:K2_GetComponentsByClass(CamClass)
+        if CamClass and CamClass:IsValid() and pawn.K2_GetComponentsByClass then
+            local comps = pawn:K2_GetComponentsByClass(CamClass)
             if comps and comps:IsValid() and comps.ForEach then
                 comps:ForEach(function(idx, comp)
                     if comp and comp:IsValid() and not State.CachedCameraComponent then
@@ -56,8 +86,8 @@ local function CachePawnComponents(Pawn)
     -- Scan for PostProcessComponent by class
     pcall(function()
         local PPClass = StaticFindObject("/Script/Engine.PostProcessComponent")
-        if PPClass and PPClass:IsValid() and Pawn.K2_GetComponentsByClass then
-            local comps = Pawn:K2_GetComponentsByClass(PPClass)
+        if PPClass and PPClass:IsValid() and pawn.K2_GetComponentsByClass then
+            local comps = pawn:K2_GetComponentsByClass(PPClass)
             if comps and comps:IsValid() and comps.ForEach then
                 comps:ForEach(function(idx, comp)
                     if comp and comp:IsValid() then
@@ -68,8 +98,8 @@ local function CachePawnComponents(Pawn)
         end
     end)
 
-    Log(string.format("Cached components for %s (Camera: %s, PP Comps: %d)",
-        Pawn:GetFullName(),
+    Log(string.format("Pawn components cached: Pawn=%s, Cam=%s, PPComps=%d",
+        pawn:GetFullName(),
         State.CachedCameraComponent and State.CachedCameraComponent:GetFullName() or "none",
         #State.CachedPostProcessComponents))
 end
@@ -77,6 +107,12 @@ end
 -- Apply or remove noise, scanlines, and CRT distortion
 local function ApplyNoiseState(enableNoise)
     local targetWeight = enableNoise and 1.0 or 0.0
+
+    RefreshPawnComponents()
+
+    local camModified = false
+    local ppModifiedCount = 0
+    local volumeCount = 0
 
     -- 1. CameraComponent PostProcess Settings & Blendables
     local cam = State.CachedCameraComponent
@@ -96,6 +132,7 @@ local function ApplyNoiseState(enableNoise)
                     end)
                 end
             end
+            camModified = true
         end)
     end
 
@@ -117,16 +154,20 @@ local function ApplyNoiseState(enableNoise)
                         end)
                     end
                 end
+                ppModifiedCount = ppModifiedCount + 1
             end)
         end
     end
 
     -- 3. PlayerCameraManager
-    local pc = State.CachedPlayerController
+    local pc = GetPlayerController()
     if pc and pc:IsValid() then
         pcall(function()
             local mgr = pc.PlayerCameraManager
             if mgr and mgr:IsValid() then
+                if mgr.PostProcessBlendWeight then
+                    mgr.PostProcessBlendWeight = targetWeight
+                end
                 if mgr.PostProcessSettings and mgr.PostProcessSettings.WeightedBlendables then
                     local arr = mgr.PostProcessSettings.WeightedBlendables.Array
                     if arr and arr.ForEach then
@@ -143,42 +184,55 @@ local function ApplyNoiseState(enableNoise)
         end)
     end
 
-    -- 4. Optional flight stabilizer (if enabled in config)
-    if Config.AlsoStabilizeFlight and not enableNoise then
-        pcall(function()
-            local pawn = State.CachedPawn
-            if pawn and pawn:IsValid() and pawn.RootComponent and pawn.RootComponent:IsValid() then
-                local rot = pawn:K2_GetActorRotation()
-                if rot then
-                    local roll = rot.Roll > 180 and (rot.Roll - 360) or rot.Roll
-                    local pitch = rot.Pitch > 180 and (rot.Pitch - 360) or rot.Pitch
-                    local targetRollRate = math.max(-180, math.min(180, -roll * (Config.StabilizerStrength or 4.0)))
-                    local targetPitchRate = math.max(-180, math.min(180, -pitch * (Config.StabilizerStrength or 4.0)))
-                    local angVel = pawn.RootComponent:GetPhysicsAngularVelocityInDegrees()
-                    if angVel then
-                        local alpha = Config.Damping or 0.35
-                        pawn.RootComponent:SetPhysicsAngularVelocityInDegrees(
-                            {
-                                X = angVel.X + (targetRollRate - angVel.X) * alpha,
-                                Y = angVel.Y + (targetPitchRate - angVel.Y) * alpha,
-                                Z = angVel.Z
-                            },
-                            false,
-                            "None"
-                        )
+    -- 4. Level PostProcessVolumes (if preset is assigned to map volume)
+    pcall(function()
+        local volumes = FindAllOf("PostProcessVolume")
+        if volumes then
+            for _, vol in ipairs(volumes) do
+                if vol:IsValid() and vol.Settings and vol.Settings.WeightedBlendables then
+                    local arr = vol.Settings.WeightedBlendables.Array
+                    if arr and arr.ForEach then
+                        arr:ForEach(function(idx, elem)
+                            pcall(function()
+                                if elem and elem.Weight then
+                                    elem.Weight = targetWeight
+                                    volumeCount = volumeCount + 1
+                                end
+                            end)
+                        end)
                     end
                 end
             end
-        end)
-    end
+        end
+    end)
+
+    -- 5. UI Widgets (e.g. WBP_FPV_Drone static / noise overlay)
+    pcall(function()
+        local widgets = FindAllOf("WBP_FPV_Drone_C")
+        if widgets then
+            for _, w in ipairs(widgets) do
+                if w:IsValid() then
+                    for _, prop in ipairs({"Noise", "Static", "Interference", "CRT", "NoiseImage", "StaticImage", "Img_Noise"}) do
+                        pcall(function()
+                            if w[prop] and w[prop]:IsValid() and w[prop].SetRenderOpacity then
+                                w[prop]:SetRenderOpacity(targetWeight)
+                            end
+                        end)
+                    end
+                end
+            end
+        end
+    end)
+
+    Log(string.format("Applied noise = %s (Weight: %.1f) [Cam: %s, PPComps: %d, Volumes: %d]",
+        tostring(enableNoise), targetWeight, tostring(camModified), ppModifiedCount, volumeCount))
 end
 
--- Lightweight enforcement loop: ensures the clean picture stays clean
--- even if the game tries to re-apply signal noise based on distance/battery
+-- Lightweight enforcement loop: keeps clean picture active while in Non-Acro
 local function EnsureNonAcroEnforcementLoop()
     if State.CurrentMode == "NON_ACRO" and not State.IsLoopRunning then
         State.IsLoopRunning = true
-        LoopAsync(33, function() -- ~30 updates per sec while in Non-Acro
+        LoopAsync(50, function() -- ~20 updates/sec while clean picture is active
             if State.CurrentMode ~= "NON_ACRO" then
                 State.IsLoopRunning = false
                 return true -- Stop loop
@@ -199,15 +253,7 @@ local function NotifyPlayer(msg)
     if not Config.ShowOnScreenMessage then return end
 
     ExecuteInGameThread(function()
-        local pc = State.CachedPlayerController
-        if not pc or not pc:IsValid() then
-            local ok, newPc = pcall(function() return UEHelpers.GetPlayerController() end)
-            if ok and newPc and newPc:IsValid() then
-                pc = newPc
-                State.CachedPlayerController = newPc
-            end
-        end
-
+        local pc = GetPlayerController()
         if pc and pc:IsValid() then
             pcall(function()
                 if pc.ClientMessage then
@@ -253,12 +299,21 @@ pcall(function()
         local pc = self:get()
         if pc and pc:IsValid() then
             State.CachedPlayerController = pc
-            local pawn = NewPawn and NewPawn:IsValid() and NewPawn:get() or pc.Pawn
+
+            local pawn = nil
+            pcall(function()
+                if NewPawn then
+                    pawn = NewPawn:get()
+                end
+            end)
+            if not pawn or not pawn:IsValid() then
+                pawn = pc.Pawn or pc.AcknowledgedPawn
+            end
+
             if pawn and pawn:IsValid() then
                 State.CachedPawn = pawn
-                CachePawnComponents(pawn)
+                RefreshPawnComponents(pawn)
 
-                -- Apply current mode to new pawn
                 if State.CurrentMode == "NON_ACRO" then
                     ApplyNoiseState(false)
                     EnsureNonAcroEnforcementLoop()

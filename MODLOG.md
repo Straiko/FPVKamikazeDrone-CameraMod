@@ -60,4 +60,9 @@
    - **Root Cause:** GTX 1050 Ti (4GB Pascal GPU) running Unreal Engine 5.6 on Linux/Proton with default DX12/VKD3D. UE5 PCD3D_SM6 shaders and high memory usage trigger driver timeouts/VRAM exhaustion under VKD3D.
    - **Recommendation:** Add `-dx11` to Steam Launch Options (`WINEDLLOVERRIDES="dwmapi=n,b" %command% -dx11`). The game contains precompiled `PCD3D_SM5` shaders, which allows DXVK to run stably and at higher FPS on 4GB GPUs.
 
+3. **Hook Runtime Error (`attempt to call a nil value (method 'IsValid')`):**
+   - **Root Cause:** In `main.lua:256`, `NewPawn` in the `ClientRestart` hook was treated as a `UObject` and called `:IsValid()`, but in UE4SS it is a `RemoteUnrealParam<APawn>` which only has `:get()`. This caused the hook callback to fail silently, so `State.CachedPawn` and `State.CachedCameraComponent` were never initialized. As a result, pressing `V` printed the toggle message but did not modify the postprocess blendables.
+   - **Fix:** Safely extracted the pawn using `NewPawn:get()` with fallback to `pc.Pawn` / `pc.AcknowledgedPawn`. Added on-demand resolution in `ApplyNoiseState` to automatically discover the drone pawn, camera components, postprocess components, and map postprocess volumes whenever the toggle key is pressed.
+
+
 
